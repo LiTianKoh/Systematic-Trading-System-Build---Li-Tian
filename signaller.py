@@ -108,56 +108,57 @@ def consolidation(stock_data, symbol):
     
     # ========== FIND RETRACEMENT LOW AFTER PEAK ==========
     data_after_peak = stock_data.iloc[peak_position + 1:]
-    
+
     if len(data_after_peak) == 0:
         consolidation_info['failure_reason'] = "Peak is most recent day - no consolidation"
         return False, "Peak is most recent day - no consolidation", consolidation_info
-    
-    retracement_low = data_after_peak['Low'].min()
-    retracement_low_date = data_after_peak['Low'].idxmin()
+
+    # Find the LOWEST CLOSE after the peak (this is the retracement low)
+    # Using Close price instead of Low price to identify the true retracement point
+    retracement_low = data_after_peak['Close'].min()
+    retracement_low_date = data_after_peak['Close'].idxmin()
     retracement_low_position = stock_data.index.get_loc(retracement_low_date)
-    
+
     # Convert low to scalar
     if hasattr(retracement_low, 'iloc') or hasattr(retracement_low, 'item'):
         retracement_low = float(retracement_low)
-    
+
     # Update consolidation info with retracement data
     consolidation_info['retracement_low'] = retracement_low
     consolidation_info['retracement_low_date'] = retracement_low_date
     consolidation_info['days_since_retracement'] = len(stock_data) - retracement_low_position - 1
-    
+
     # ========== CHECK RETRACEMENT PERCENTAGE ==========
     retracement_pct = ((peak_price - retracement_low) / peak_price) * 100
     consolidation_info['retracement_pct'] = retracement_pct
-    
+
     if retracement_pct >= MAX_RETRACEMENT:
         consolidation_info['failure_reason'] = f"Retracement {retracement_pct:.1f}% ≥ {MAX_RETRACEMENT}%"
         return False, f"Retracement {retracement_pct:.1f}% ≥ {MAX_RETRACEMENT}%", consolidation_info
-    
+
     # ========== FIND CONSOLIDATION RANGE AFTER RETRACEMENT ==========
+    # Data from the retracement low through today
     data_after_retracement = stock_data.iloc[retracement_low_position:]
 
-    # Set consolidation start date (the retracement low date itself)
-    # The consolidation period STARTS at the retracement low
+    # Set consolidation start date (the retracement low date itself - Feb 10)
     consolidation_info['consolidation_start_date'] = retracement_low_date
 
     # Calculate days in consolidation:
-    # This counts the number of trading days SINCE the retracement low (including the low day as day 0)
-    # For example: 
-    # - If low was today: 0 days in consolidation (just started)
+    # Number of trading days SINCE the retracement low (including today, excluding the low day itself)
+    # For example:
+    # - If low was today: 0 days in consolidation
     # - If low was yesterday: 1 day in consolidation
-    # - If low was 2 days ago: 2 days in consolidation
-    days_in_consolidation = len(stock_data) - retracement_low_position
+    # - If low was Feb 10 and today is Feb 11: 1 day in consolidation
+    days_in_consolidation = len(stock_data) - retracement_low_position - 1
     consolidation_info['days_in_consolidation'] = max(0, days_in_consolidation)
 
-    # ONLY calculate range metrics if we have at least the low day itself
-    if len(data_after_retracement) >= 1:
-        # Data from the low through today (includes the low day)
-        consolidation_period = data_after_retracement
+    # ONLY calculate range metrics if we have at least 1 day of data after the low
+    if len(data_after_retracement) > 1:
+        # Data from the day AFTER the low through today (exclude the low day itself)
+        consolidation_period = data_after_retracement.iloc[1:]
         
         if len(consolidation_period) > 0:
-            # Find consolidation high from the period starting AT the low
-            # This allows the low day itself to be part of the consolidation range
+            # Find consolidation high from the period AFTER the low
             consolidation_high = consolidation_period['High'].max()
             consolidation_high_date = consolidation_period['High'].idxmax()
             consolidation_low = retracement_low  # Low is the retracement low
