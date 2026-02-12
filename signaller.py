@@ -17,13 +17,14 @@ from config import (
 def riser(stock_data, symbol, window_days=RISER_WINDOW, min_increase=RISER_MIN_INCREASE):
     """
     Check if stock price increased by min_increase% in last window_days.
-    Returns: (passed, message)
+    Returns: (passed, message, riser_info)
     """
     if len(stock_data) < window_days:
-        return False, f"Insufficient data: {len(stock_data)} < {window_days} days"
+        return False, f"Insufficient data: {len(stock_data)} < {window_days} days", {}
     
     current_price = stock_data['Close'].iloc[-1]
     price_ago = stock_data['Close'].iloc[-window_days]
+    date_ago = stock_data.index[-window_days]
     
     # Convert to scalars
     if hasattr(current_price, 'iloc') or hasattr(current_price, 'item'):
@@ -32,11 +33,22 @@ def riser(stock_data, symbol, window_days=RISER_WINDOW, min_increase=RISER_MIN_I
         price_ago = float(price_ago)
     
     increase_pct = ((current_price - price_ago) / price_ago) * 100
+    increase_amount = current_price - price_ago
+    
+    riser_info = {
+        'date_63_days_ago': date_ago.date(),
+        'price_63_days_ago': price_ago,
+        'current_price': current_price,
+        'increase_amount': increase_amount,
+        'increase_pct': increase_pct,
+        'required_pct': min_increase,
+        'passed': increase_pct >= min_increase
+    }
     
     if increase_pct < min_increase:
-        return False, f"Riser FAIL: +{increase_pct:.1f}% < {min_increase}%"
+        return False, f"Riser FAIL: +{increase_pct:.1f}% < {min_increase}%", riser_info
     
-    return True, f"Riser PASS: +{increase_pct:.1f}% in {window_days} days"
+    return True, f"Riser PASS: +{increase_pct:.1f}% in {window_days} days", riser_info
 
 
 def consolidation(stock_data, symbol):
@@ -47,9 +59,37 @@ def consolidation(stock_data, symbol):
     
     Returns: (passed, message, consolidation_info)
     """
+    # ========== INITIALIZE CONSOLIDATION INFO WITH DEFAULTS ==========
+    consolidation_info = {
+        'peak_price': 0,
+        'peak_date': None,
+        'days_since_peak': 0,
+        'retracement_pct': 0,
+        'retracement_low': 0,
+        'retracement_low_date': None,
+        'consolidation_start_date': None,  # New field
+        'consolidation_high': 0,
+        'consolidation_low': 0,
+        'consolidation_high_date': None,
+        'range_width_pct': 0,
+        'range_height': 0,
+        'days_in_consolidation': 0,
+        'days_since_retracement': 0,
+        'close_percentage_in_range': 0,
+        'closes_in_range': 0,
+        'total_days_in_range': 0,
+        'current_price': 0,
+        'breakout_level': 0,
+        'stop_loss_level': 0,
+        'upper_bound_with_buffer': 0,
+        'lower_bound_with_buffer': 0,
+        'failure_reason': None
+    }
+    
     # ========== VALIDATION ==========
     if len(stock_data) < RISER_WINDOW:
-        return False, f"Need {RISER_WINDOW}+ days, got {len(stock_data)}", {}
+        consolidation_info['failure_reason'] = f"Need {RISER_WINDOW}+ days, got {len(stock_data)}"
+        return False, f"Need {RISER_WINDOW}+ days, got {len(stock_data)}", consolidation_info
     
     # ========== FIND PEAK IN LAST 63 DAYS ==========
     last_63_days = stock_data.iloc[-RISER_WINDOW:]
@@ -61,11 +101,17 @@ def consolidation(stock_data, symbol):
     if hasattr(peak_price, 'iloc') or hasattr(peak_price, 'item'):
         peak_price = float(peak_price)
     
+    # Update consolidation info with peak data
+    consolidation_info['peak_price'] = peak_price
+    consolidation_info['peak_date'] = peak_date
+    consolidation_info['days_since_peak'] = len(stock_data) - peak_position - 1
+    
     # ========== FIND RETRACEMENT LOW AFTER PEAK ==========
     data_after_peak = stock_data.iloc[peak_position + 1:]
     
     if len(data_after_peak) == 0:
-        return False, "Peak is most recent day - no consolidation", {}
+        consolidation_info['failure_reason'] = "Peak is most recent day - no consolidation"
+        return False, "Peak is most recent day - no consolidation", consolidation_info
     
     retracement_low = data_after_peak['Low'].min()
     retracement_low_date = data_after_peak['Low'].idxmin()
@@ -75,113 +121,130 @@ def consolidation(stock_data, symbol):
     if hasattr(retracement_low, 'iloc') or hasattr(retracement_low, 'item'):
         retracement_low = float(retracement_low)
     
+    # Update consolidation info with retracement data
+    consolidation_info['retracement_low'] = retracement_low
+    consolidation_info['retracement_low_date'] = retracement_low_date
+    consolidation_info['days_since_retracement'] = len(stock_data) - retracement_low_position - 1
+    
     # ========== CHECK RETRACEMENT PERCENTAGE ==========
     retracement_pct = ((peak_price - retracement_low) / peak_price) * 100
+    consolidation_info['retracement_pct'] = retracement_pct
     
     if retracement_pct >= MAX_RETRACEMENT:
-        return False, f"Retracement {retracement_pct:.1f}% ≥ {MAX_RETRACEMENT}%", {}
+        consolidation_info['failure_reason'] = f"Retracement {retracement_pct:.1f}% ≥ {MAX_RETRACEMENT}%"
+        return False, f"Retracement {retracement_pct:.1f}% ≥ {MAX_RETRACEMENT}%", consolidation_info
     
     # ========== FIND CONSOLIDATION RANGE AFTER RETRACEMENT ==========
     data_after_retracement = stock_data.iloc[retracement_low_position:]
-    
-    if len(data_after_retracement) < CONSOLIDATION_MIN_DAYS:
-        return False, f"Only {len(data_after_retracement)} days since retracement", {}
-    
-    consolidation_high = data_after_retracement['High'].max()
-    consolidation_high_date = data_after_retracement['High'].idxmax()
-    consolidation_low = retracement_low
-    
-    # Convert high to scalar
-    if hasattr(consolidation_high, 'iloc') or hasattr(consolidation_high, 'item'):
-        consolidation_high = float(consolidation_high)
+
+    # Set consolidation start date (the retracement low date itself)
+    # The consolidation period STARTS at the retracement low
+    consolidation_info['consolidation_start_date'] = retracement_low_date
+
+    # Calculate days in consolidation:
+    # This counts the number of trading days SINCE the retracement low (including the low day as day 0)
+    # For example: 
+    # - If low was today: 0 days in consolidation (just started)
+    # - If low was yesterday: 1 day in consolidation
+    # - If low was 2 days ago: 2 days in consolidation
+    days_in_consolidation = len(stock_data) - retracement_low_position
+    consolidation_info['days_in_consolidation'] = max(0, days_in_consolidation)
+
+    # ONLY calculate range metrics if we have at least the low day itself
+    if len(data_after_retracement) >= 1:
+        # Data from the low through today (includes the low day)
+        consolidation_period = data_after_retracement
+        
+        if len(consolidation_period) > 0:
+            # Find consolidation high from the period starting AT the low
+            # This allows the low day itself to be part of the consolidation range
+            consolidation_high = consolidation_period['High'].max()
+            consolidation_high_date = consolidation_period['High'].idxmax()
+            consolidation_low = retracement_low  # Low is the retracement low
+            
+            # Convert high to scalar
+            if hasattr(consolidation_high, 'iloc') or hasattr(consolidation_high, 'item'):
+                consolidation_high = float(consolidation_high)
+            
+            # Update consolidation info with range data
+            consolidation_info['consolidation_high'] = consolidation_high
+            consolidation_info['consolidation_high_date'] = consolidation_high_date
+            consolidation_info['consolidation_low'] = consolidation_low
+            
+            # Calculate range metrics
+            if consolidation_high > consolidation_low:
+                range_width_pct = ((consolidation_high - consolidation_low) / consolidation_high) * 100
+                range_height = consolidation_high - consolidation_low
+            else:
+                range_width_pct = 0
+                range_height = 0
+            
+            consolidation_info['range_width_pct'] = range_width_pct
+            consolidation_info['range_height'] = range_height
+            
+            # Buffer levels
+            consolidation_info['upper_bound_with_buffer'] = consolidation_high * (1 + UPPER_BUFFER)
+            consolidation_info['lower_bound_with_buffer'] = consolidation_low * (1 - LOWER_BUFFER)
+            
+            # Breakout level and stop loss
+            consolidation_info['breakout_level'] = consolidation_high
+            consolidation_info['stop_loss_level'] = consolidation_low
+            
+            # ========== CHECK CLOSING PRICES WITHIN RANGE ==========
+            closing_prices = consolidation_period['Close']
+            closes_in_range = ((closing_prices >= consolidation_low) & 
+                            (closing_prices <= consolidation_high)).sum()
+            close_pct = (closes_in_range / len(closing_prices)) * 100
+            
+            consolidation_info['close_percentage_in_range'] = close_pct
+            consolidation_info['closes_in_range'] = closes_in_range
+            consolidation_info['total_days_in_range'] = len(closing_prices)
     
     # ========== CHECK CONSOLIDATION DURATION ==========
-    current_position = len(stock_data) - 1
-    days_in_consolidation = current_position - retracement_low_position
-    
     if days_in_consolidation < CONSOLIDATION_MIN_DAYS:
-        return False, f"Only {days_in_consolidation} days consolidation", {}
+        consolidation_info['failure_reason'] = f"Only {days_in_consolidation} days since retracement (need {CONSOLIDATION_MIN_DAYS}+)"
+        return False, f"Only {days_in_consolidation} days since retracement", consolidation_info
     
     if days_in_consolidation > CONSOLIDATION_MAX_DAYS:
-        return False, f"{days_in_consolidation} days > {CONSOLIDATION_MAX_DAYS} max", {}
+        consolidation_info['failure_reason'] = f"{days_in_consolidation} days > {CONSOLIDATION_MAX_DAYS} max"
+        return False, f"{days_in_consolidation} days > {CONSOLIDATION_MAX_DAYS} max", consolidation_info
     
     # ========== CHECK PRICE STAYS IN RANGE ==========
-    consolidation_period = stock_data.iloc[retracement_low_position:]
-    
-    upper_bound = consolidation_high * (1 + UPPER_BUFFER)
-    lower_bound = consolidation_low * (1 - LOWER_BUFFER)
-    
-    violations = []
-    for date_idx, daily_bar in consolidation_period.iterrows():
-        high = daily_bar['High']
-        low = daily_bar['Low']
+    if len(consolidation_period) > 0:
+        violations = []
+        for date_idx, daily_bar in consolidation_period.iterrows():
+            high = daily_bar['High']
+            low = daily_bar['Low']
+            
+            if hasattr(high, 'iloc') or hasattr(high, 'item'):
+                high = float(high)
+            if hasattr(low, 'iloc') or hasattr(low, 'item'):
+                low = float(low)
+            
+            if high > consolidation_info['upper_bound_with_buffer']:
+                violations.append(f"{date_idx.date()}: High ${high:.2f} > ${consolidation_info['upper_bound_with_buffer']:.2f}")
+            if low < consolidation_info['lower_bound_with_buffer']:
+                violations.append(f"{date_idx.date()}: Low ${low:.2f} < ${consolidation_info['lower_bound_with_buffer']:.2f}")
         
-        if hasattr(high, 'iloc') or hasattr(high, 'item'):
-            high = float(high)
-        if hasattr(low, 'iloc') or hasattr(low, 'item'):
-            low = float(low)
-        
-        if high > upper_bound:
-            violations.append(f"{date_idx.date()}: High ${high:.2f} > ${upper_bound:.2f}")
-        if low < lower_bound:
-            violations.append(f"{date_idx.date()}: Low ${low:.2f} < ${lower_bound:.2f}")
-    
-    if violations:
-        return False, f"Range violations: {violations[0]}", {}
+        if violations:
+            consolidation_info['failure_reason'] = f"Range violations: {violations[0]}"
+            return False, f"Range violations: {violations[0]}", consolidation_info
     
     # ========== CHECK CLOSING PRICES WITHIN RANGE ==========
-    closing_prices = consolidation_period['Close']
-    closes_in_range = ((closing_prices >= consolidation_low) & 
-                       (closing_prices <= consolidation_high)).sum()
-    close_pct = (closes_in_range / len(closing_prices)) * 100
+    if consolidation_info['close_percentage_in_range'] < 70:
+        consolidation_info['failure_reason'] = f"Only {consolidation_info['close_percentage_in_range']:.1f}% closes within range (need 70%+)"
+        return False, f"Only {consolidation_info['close_percentage_in_range']:.1f}% closes within range", consolidation_info
     
-    if close_pct < 70:
-        return False, f"Only {close_pct:.1f}% closes within range", {}
-    
-    # ========== PREPARE CONSOLIDATION INFO ==========
+    # ========== GET CURRENT PRICE ==========
     current_price = stock_data['Close'].iloc[-1]
     if hasattr(current_price, 'iloc') or hasattr(current_price, 'item'):
         current_price = float(current_price)
-    
-    range_width_pct = ((consolidation_high - consolidation_low) / consolidation_high) * 100
-    
-    if consolidation_high > consolidation_low:
-        current_pos_pct = ((current_price - consolidation_low) / 
-                          (consolidation_high - consolidation_low)) * 100
-    else:
-        current_pos_pct = 50
-    
-    consolidation_info = {
-        # Peak info
-        'peak_price': peak_price,
-        'peak_date': peak_date,
-        'retracement_pct': retracement_pct,
-        
-        # Consolidation range
-        'consolidation_high': consolidation_high,
-        'consolidation_high_date': consolidation_high_date,
-        'consolidation_low': consolidation_low,
-        'consolidation_low_date': retracement_low_date,
-        
-        # Duration
-        'days_in_consolidation': days_in_consolidation,
-        'days_since_peak': current_position - peak_position,
-        
-        # Metrics
-        'range_width_pct': range_width_pct,
-        'current_price': current_price,
-        'current_position_in_range': current_pos_pct,
-        'close_percentage_in_range': close_pct,
-        
-        # For entry trigger
-        'breakout_level': consolidation_high,
-        'stop_loss_level': consolidation_low
-    }
+    consolidation_info['current_price'] = current_price
     
     message = (
         f"Consolidation PASS: {days_in_consolidation} days, "
-        f"range ${consolidation_low:.2f}-${consolidation_high:.2f} "
-        f"({range_width_pct:.1f}%), retrace {retracement_pct:.1f}%"
+        f"range ${consolidation_info['consolidation_low']:.2f}-${consolidation_info['consolidation_high']:.2f} "
+        f"({consolidation_info['range_width_pct']:.1f}%), retrace {retracement_pct:.1f}%"
     )
     
     return True, message, consolidation_info
@@ -220,24 +283,35 @@ def entry_trigger(stock_data, symbol, consolidation_info):
             'stop_loss_level': stop_loss_level,
             'risk_per_share': current_price - stop_loss_level,
             'risk_percentage': ((current_price - stop_loss_level) / current_price) * 100,
-            'original_peak': consolidation_info.get('peak_price', breakout_level)
+            'original_peak': consolidation_info.get('peak_price', breakout_level),
+            'breakout_strength': ((current_high - breakout_level) / breakout_level) * 100,
+            'breakout_threshold': breakout_level * (1 + BREAKOUT_BUFFER)
         }
         
-        message = f"BUY: Broke ${breakout_level:.2f} at ${current_price:.2f}"
+        message = f"BUY: Broke ${breakout_level:.2f} +{BREAKOUT_BUFFER*100:.0f}% at ${current_price:.2f}"
         return True, message, current_price, entry_details
     
     # No breakout
-    distance_pct = ((breakout_level - current_price) / breakout_level) * 100
+    distance_to_breakout = breakout_level - current_price
+    distance_to_breakout_pct = (distance_to_breakout / breakout_level) * 100
+    required_price = breakout_level * (1 + BREAKOUT_BUFFER)
+    distance_to_threshold = required_price - current_price
+    distance_to_threshold_pct = (distance_to_threshold / required_price) * 100
     
     entry_details = {
         'symbol': symbol,
         'current_price': current_price,
-        'breakout_level_needed': breakout_level,
-        'distance_to_breakout_pct': distance_pct,
+        'current_high': current_high,
+        'breakout_level': breakout_level,
+        'breakout_threshold': required_price,
+        'distance_to_breakout': distance_to_breakout,
+        'distance_to_breakout_pct': distance_to_breakout_pct,
+        'distance_to_threshold': distance_to_threshold,
+        'distance_to_threshold_pct': distance_to_threshold_pct,
         'stop_loss_level': stop_loss_level
     }
     
-    message = f"HOLD: Need +{distance_pct:.1f}% to break ${breakout_level:.2f}"
+    message = f"HOLD: Need +{distance_to_threshold_pct:.1f}% to break ${required_price:.2f}"
     return False, message, current_price, entry_details
 
 
@@ -257,12 +331,13 @@ def run_signaller(stock_data, symbol):
         'consolidation_passed': False,
         'entry_triggered': False,
         
-        # Stage messages
-        'messages': [],
-        
-        # Data for executor
+        # Stage info
+        'riser_info': None,
         'consolidation_info': None,
         'entry_details': None,
+        
+        # Stage messages
+        'messages': [],
         
         # Final signal
         'signal': 'NO_SIGNAL',
@@ -270,8 +345,9 @@ def run_signaller(stock_data, symbol):
     }
     
     # ===== STAGE 1: RISER =====
-    riser_passed, riser_msg = riser(stock_data, symbol)
+    riser_passed, riser_msg, riser_info = riser(stock_data, symbol)
     results['riser_passed'] = riser_passed
+    results['riser_info'] = riser_info
     results['messages'].append(f"RISER: {riser_msg}")
     
     if not riser_passed:
@@ -282,7 +358,7 @@ def run_signaller(stock_data, symbol):
     cons_passed, cons_msg, cons_info = consolidation(stock_data, symbol)
     results['consolidation_passed'] = cons_passed
     results['messages'].append(f"CONSOLIDATION: {cons_msg}")
-    results['consolidation_info'] = cons_info
+    results['consolidation_info'] = cons_info  # This now ALWAYS contains data, even on failure
     
     if not cons_passed:
         results['signal'] = 'CONSOLIDATION_FAIL'

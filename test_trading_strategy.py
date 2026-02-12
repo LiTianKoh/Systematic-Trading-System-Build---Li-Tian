@@ -1,4 +1,4 @@
-# =================== interactive_test.py ===================
+# =================== test_trading_strategy.py ===================
 """
 Interactive Test Console for Trading System
 Run this file to test any stock in real-time
@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import trading system modules
-from config import TECH_STOCKS
+from config import TECH_STOCKS, RISER_MIN_INCREASE, BREAKOUT_BUFFER, MAX_RETRACEMENT, CONSOLIDATION_MIN_DAYS, CONSOLIDATION_MAX_DAYS
 from screener import run_screener
 from signaller import run_signaller
 from executor import TradeExecutor
@@ -77,6 +77,56 @@ class TradingTestConsole:
             for i, cell in enumerate(row):
                 row_str += f" {str(cell):<{col_widths[i]}} │"
             print(row_str[:-1])
+    
+    def format_date(self, date):
+        """Format date consistently."""
+        if date is None:
+            return 'N/A'
+        if hasattr(date, 'date'):
+            return date.date()
+        return date
+    
+    def display_riser_info(self, riser_info):
+        """Display detailed riser information - clean and simple."""
+        if not riser_info:
+            return
+        
+        print(f"\n     📈 RISER (63-day lookback):")
+        print(f"        Date 63 days ago: {riser_info.get('date_63_days_ago', 'N/A')}")
+        print(f"        Price 63 days ago: ${riser_info.get('price_63_days_ago', 0):.2f}")
+        print(f"        Current Price: ${riser_info.get('current_price', 0):.2f}")
+        print(f"        63-day Change: {riser_info.get('increase_pct', 0):+.1f}%")
+        print(f"        Required: +{riser_info.get('required_pct', 30)}%")
+    
+    def display_consolidation_info(self, cons_info, passed=None):
+        """
+        Display consolidation information - EXACT format requested.
+        Shows metrics regardless of pass/fail status.
+        """
+        if not cons_info:
+            return
+        
+        # Determine status indicator
+        if passed is True:
+            status = "✅ PASSED"
+        elif passed is False:
+            status = "❌ FAILED"
+        else:
+            status = "ℹ️  INFO"
+        
+        print(f"\n     📊 CONSOLIDATION DETAILS {status}:")
+        print(f"        Peak: ${cons_info.get('peak_price', 0):.2f} on {self.format_date(cons_info.get('peak_date', ''))}")
+        print(f"        Retracement: {cons_info.get('retracement_pct', 0):.1f}% to ${cons_info.get('retracement_low', 0):.2f}")
+        print(f"        Consolidation start: {self.format_date(cons_info.get('consolidation_start_date', ''))}")
+        print(f"        Range: ${cons_info.get('consolidation_low', 0):.2f} - ${cons_info.get('consolidation_high', 0):.2f}")
+        print(f"        Width: {cons_info.get('range_width_pct', 0):.1f}%")
+        print(f"        Days since peak: {cons_info.get('days_since_peak', 0)}")
+        print(f"        Days in consolidation: {cons_info.get('days_in_consolidation', 0)}")
+        print(f"        Closes in range: {cons_info.get('close_percentage_in_range', 0):.1f}%")
+        
+        # If consolidation failed, show the reason
+        if passed is False and cons_info.get('failure_reason'):
+            print(f"        ⚠️  Failure reason: {cons_info['failure_reason']}")
     
     def get_user_input(self):
         """Get stock symbol from user."""
@@ -152,7 +202,6 @@ class TradingTestConsole:
             print(f"     Price: ${current_price:.2f}")
             print(f"     Date: {data.index[-1].date()}")
             print(f"     Days: {len(data)} trading days")
-            print(f"     Range: ${data['Low'].min():.2f} - ${data['High'].max():.2f}")
             
             # ===== PHASE II: SCREENER =====
             self.print_section("PHASE II: SCREENER")
@@ -168,7 +217,7 @@ class TradingTestConsole:
             self.print_section("PHASE III: SIGNALLER")
             signal = run_signaller(data, symbol)
             
-            # Display signal stages
+            # Display signal stages table
             stage_data = []
             for msg in signal['messages']:
                 if 'RISER' in msg:
@@ -192,22 +241,24 @@ class TradingTestConsole:
             
             self.print_table(["Stage", "Result", "Details"], stage_data)
             
+            # ----- DISPLAY RISER INFO (always show if riser was attempted) -----
+            if signal.get('riser_info'):
+                self.display_riser_info(signal['riser_info'])
+            
+            # ----- DISPLAY CONSOLIDATION INFO (ALWAYS show metrics, even if failed) -----
+            if signal.get('consolidation_info'):
+                self.display_consolidation_info(
+                    signal['consolidation_info'], 
+                    passed=signal.get('consolidation_passed')
+                )
+            
             # Final signal
             if signal['signal'] == 'BUY':
-                self.print_success(f"🚀 BUY SIGNAL GENERATED")
+                self.print_success(f"  FINAL SIGNAL: {signal['signal']}")
             elif signal['signal'] == 'HOLD':
-                self.print_warning(f"⏸️  HOLD - Consolidating, waiting for breakout")
+                self.print_warning(f"  FINAL SIGNAL: {signal['signal']}")
             else:
-                self.print_error(f"❌ NO SIGNAL - {signal['signal']}")
-            
-            # Show consolidation info if available
-            if signal.get('consolidation_info'):
-                ci = signal['consolidation_info']
-                print(f"\n     📊 Consolidation Range:")
-                print(f"        High: ${ci['consolidation_high']:.2f}")
-                print(f"        Low:  ${ci['consolidation_low']:.2f}")
-                print(f"        Width: {ci['range_width_pct']:.1f}%")
-                print(f"        Days: {ci['days_in_consolidation']}")
+                self.print_error(f"  FINAL SIGNAL: {signal['signal']}")
             
             # ===== PHASE IV: EXECUTOR (if BUY signal) =====
             trade_plan = None
@@ -222,21 +273,18 @@ class TradingTestConsole:
                     signal['consolidation_info']
                 )
                 
-                # Display trade plan
+                # Display trade plan summary
                 if trade_plan['status'] == 'READY':
                     pos = trade_plan['position']
                     print(f"\n     💰 TRADE EXECUTION PLAN:")
                     print(f"        Buy {pos['shares']:,} shares @ ${pos['entry_price']:.2f}")
                     print(f"        Stop Loss: ${pos['stop_loss']:.2f}")
-                    print(f"        Position: ${pos['position_value']:,.2f} ({pos['position_pct']:.1f}% of account)")
                     print(f"        Risk: ${pos['risk_amount']:,.2f} ({pos['risk_percent']:.1f}%)")
                     
                     # Risk-Reward
                     rr = trade_plan.get('risk_reward', {})
                     if 'rr_ratio_1' in rr:
                         print(f"        Risk/Reward: {rr['rr_ratio_1']:.2f}:1")
-                    
-                    self.print_success("TRADE READY FOR EXECUTION")
             
             # Save result
             result = self._save_result(
@@ -305,7 +353,10 @@ class TradingTestConsole:
                     'symbol': symbol,
                     'price': float(data['Close'].iloc[-1]),
                     'signal': signal['signal'],
-                    'consolidation': signal.get('consolidation_passed', False)
+                    'consolidation': signal.get('consolidation_passed', False),
+                    'riser_pct': signal.get('riser_info', {}).get('increase_pct', 0) if signal.get('riser_info') else 0,
+                    'retracement': signal.get('consolidation_info', {}).get('retracement_pct', 0) if signal.get('consolidation_info') else 0,
+                    'days_since_peak': signal.get('consolidation_info', {}).get('days_since_peak', 0) if signal.get('consolidation_info') else 0
                 })
                 
             except Exception:
@@ -316,7 +367,7 @@ class TradingTestConsole:
         print("─" * 80)
         
         # Table headers
-        headers = ["Symbol", "Price", "Signal", "Status", "Action"]
+        headers = ["Symbol", "Price", "Signal", "63d Chg", "Retrace", "Days", "Status"]
         rows = []
         
         buy_count = 0
@@ -325,25 +376,24 @@ class TradingTestConsole:
         for r in sorted(results, key=lambda x: x['signal']):
             if r['signal'] == 'BUY':
                 signal_icon = "✅ BUY"
-                status = "Breakout detected"
-                action = "🚀 BUY"
+                status = "Breakout"
                 buy_count += 1
             elif r['signal'] == 'HOLD':
                 signal_icon = "⏸️  HOLD"
                 status = "Consolidating"
-                action = "👀 Monitor"
                 hold_count += 1
             else:
                 signal_icon = "❌ FAIL"
-                status = "No setup"
-                action = "⏸️ Skip"
+                status = r['signal'].replace('_', ' ').title()
             
             rows.append([
                 r['symbol'],
                 f"${r['price']:.2f}",
                 signal_icon,
-                status,
-                action
+                f"{r.get('riser_pct', 0):+.1f}%",
+                f"{r.get('retracement', 0):.1f}%",
+                r.get('days_since_peak', 0),
+                status
             ])
         
         self.print_table(headers, rows)
@@ -403,17 +453,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.symbol:
-        # Command line mode: python interactive_test.py NVDA
+        # Command line mode: python test_trading_strategy.py NVDA
         console = TradingTestConsole()
         console.test_stock(args.symbol.upper())
     
     elif args.scan:
-        # Scan mode: python interactive_test.py --scan
+        # Scan mode: python test_trading_strategy.py --scan
         console = TradingTestConsole()
         console.scan_all_stocks()
     
     elif args.quick:
-        # Quick test mode: python interactive_test.py --quick
+        # Quick test mode: python test_trading_strategy.py --quick
         quick_test()
     
     else:
